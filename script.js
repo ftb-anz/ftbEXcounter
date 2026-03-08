@@ -1,9 +1,37 @@
+// ==============================
+// 定数
+// ==============================
+const MAX_HISTORY = 5;
+
+// ==============================
+// 状態
+// ==============================
+
 // 記録データを管理する配列
 let records = [];
 
 // タブを管理するための変数
 let activeTabIndex = 0;
 let editModes = []; // 各レコードの編集モード状態
+
+// ==============================
+// ユーティリティ
+// ==============================
+
+/** HTMLエスケープ（XSS対策） */
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+/** 遭遇確率を再計算 */
+function calcProbability(record) {
+    return record.totalRounds > 0 ? record.encounters / record.totalRounds : 0;
+}
 
 // ローカルストレージにデータを保存する
 function saveRecords() {
@@ -16,17 +44,23 @@ function saveRecords() {
 
 // ローカルストレージからデータを読み込む
 function loadRecords() {
-    const savedRecords = localStorage.getItem('records');
-    if (savedRecords) {
-        const parsedRecords = JSON.parse(savedRecords);
-        records = parsedRecords.map(record => ({
+    try {
+        const saved = localStorage.getItem('records');
+        if (!saved) return;
+        const parsed = JSON.parse(saved);
+        if (!Array.isArray(parsed)) return;
+        records = parsed.map(record => ({
             ...record,
+            defeats:    record.defeats    ?? 0,
+            totalDrops: record.totalDrops ?? 0,
             history: [],
-            future: [],
-            defeats: record.defeats || 0,
-            totalDrops: record.totalDrops || 0
+            future:  [],
         }));
         editModes = records.map(() => false);
+    } catch (e) {
+        console.error('データの読み込みに失敗しました:', e);
+        records = [];
+        editModes = [];
     }
 }
 
@@ -34,8 +68,8 @@ function loadRecords() {
 function pushHistory(record) {
     const { history, future, ...state } = record;
     record.history.push(state);
-    if (record.history.length > 5) record.history.shift();
-    record.future = []; // 新しい操作でredoスタックをクリア
+    if (record.history.length > MAX_HISTORY) record.history.shift();
+    record.future = [];
 }
 
 // 記録を追加する
@@ -62,11 +96,64 @@ function addRecord() {
 }
 
 // タブを描画する
+function buildStatCard(label, value, index, field, isEditing, extraClass = '') {
+    const cls = ['stat-value', 'editable-field', extraClass].filter(Boolean).join(' ');
+    return `
+        <div class="stat-card">
+            <span class="stat-label">${label}</span>
+            <span class="${cls}" contenteditable="${isEditing}" data-index="${index}" data-field="${field}">${value}</span>
+        </div>`;
+}
+
+function buildTabContent(record, index) {
+    const isEditing  = editModes[index] || false;
+    const safeName   = escapeHtml(record.name);
+    const safeDate   = escapeHtml(record.lastUpdated);
+    return `
+        <div class="record-header">
+            <div class="record-header-info">
+                <h2 contenteditable="true" class="editable-name" data-index="${index}">${safeName}</h2>
+                <span class="last-updated">最終更新: ${safeDate}</span>
+            </div>
+            <div class="header-actions">
+                <div class="header-actions-top">
+                    <button class="btn-delete-icon delete" data-index="${index}" title="記録を削除">×</button>
+                </div>
+                <div class="header-actions-bottom">
+                    <button class="btn-undo undo" data-index="${index}">↶ Undo</button>
+                    <button class="btn-redo redo" data-index="${index}">↷ Redo</button>
+                </div>
+            </div>
+        </div>
+        <div class="edit-toggle-bar">
+            <button class="btn-edit-toggle edit-toggle${isEditing ? ' active' : ''}" data-index="${index}">✏️ 編集</button>
+        </div>
+        <div class="stats-grid${isEditing ? ' editing' : ''}">
+            ${buildStatCard('総周回数',    record.totalRounds,          index, 'totalRounds',         isEditing)}
+            ${buildStatCard('遭遇回数',    record.encounters,           index, 'encounters',          isEditing)}
+            <div class="stat-card">
+                <span class="stat-label">遭遇確率</span>
+                <span class="stat-value">${(record.probability * 100).toFixed(2)}%</span>
+            </div>
+            ${buildStatCard('現在ハマり',  record.lastEncounterRounds,  index, 'lastEncounterRounds',  isEditing, 'highlight')}
+            ${buildStatCard('最小ハマり',  record.minRounds,            index, 'minRounds',           isEditing)}
+            ${buildStatCard('最大ハマり',  record.maxRounds,            index, 'maxRounds',           isEditing)}
+            ${buildStatCard('総ドロップ数', record.totalDrops,        index, 'totalDrops',          isEditing)}
+            ${buildStatCard('敗北数',      record.defeats,              index, 'defeats',             isEditing)}
+        </div>
+        <div class="controls">
+            <div class="encounter-buttons">
+                <button class="btn-encounter-none encounter-none" data-index="${index}">遭遇なし</button>
+                <button class="btn-encounter encounter" data-index="${index}">遭遇</button>
+            </div>
+        </div>`;
+}
+
 function renderTabs() {
-    const tabsList = document.getElementById('tabs-list');
+    const tabsList    = document.getElementById('tabs-list');
     const tabsContent = document.getElementById('tabs-content');
 
-    tabsList.innerHTML = '';
+    tabsList.innerHTML    = '';
     tabsContent.innerHTML = '';
 
     records.forEach((record, index) => {
@@ -83,67 +170,7 @@ function renderTabs() {
         const content = document.createElement('div');
         content.className = 'tab-content';
         content.style.display = index === activeTabIndex ? 'block' : 'none';
-        const isEditing = editModes[index] || false;
-        content.innerHTML = `
-            <div class="record-header">
-                <div class="record-header-info">
-                    <h2 contenteditable="true" class="editable-name" data-index="${index}">${record.name}</h2>
-                    <span class="last-updated">最終更新: ${record.lastUpdated}</span>
-                </div>
-                <div class="header-actions">
-                    <div class="header-actions-top">
-                        <button class="btn-delete-icon delete" data-index="${index}" title="記録を削除">×</button>
-                    </div>
-                    <div class="header-actions-bottom">
-                        <button class="btn-undo undo" data-index="${index}">↶ Undo</button>
-                        <button class="btn-redo redo" data-index="${index}">↷ Redo</button>
-                    </div>
-                </div>
-            </div>
-            <div class="edit-toggle-bar">
-                <button class="btn-edit-toggle edit-toggle${isEditing ? ' active' : ''}" data-index="${index}">✏️ 編集</button>
-            </div>
-            <div class="stats-grid${isEditing ? ' editing' : ''}">
-                <div class="stat-card">
-                    <span class="stat-label">総周回数</span>
-                    <span class="stat-value editable-field" contenteditable="${isEditing}" data-index="${index}" data-field="totalRounds">${record.totalRounds}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">遭遇回数</span>
-                    <span class="stat-value editable-field" contenteditable="${isEditing}" data-index="${index}" data-field="encounters">${record.encounters}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">遭遇確率</span>
-                    <span class="stat-value">${(record.probability * 100).toFixed(2)}%</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">現在ハマり</span>
-                    <span class="stat-value highlight editable-field" contenteditable="${isEditing}" data-index="${index}" data-field="lastEncounterRounds">${record.lastEncounterRounds}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">最小ハマり</span>
-                    <span class="stat-value editable-field" contenteditable="${isEditing}" data-index="${index}" data-field="minRounds">${record.minRounds}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">最大ハマり</span>
-                    <span class="stat-value editable-field" contenteditable="${isEditing}" data-index="${index}" data-field="maxRounds">${record.maxRounds}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">総ドロップ数</span>
-                    <span class="stat-value editable-field" contenteditable="${isEditing}" data-index="${index}" data-field="totalDrops">${record.totalDrops}</span>
-                </div>
-                <div class="stat-card">
-                    <span class="stat-label">敗北数</span>
-                    <span class="stat-value editable-field" contenteditable="${isEditing}" data-index="${index}" data-field="defeats">${record.defeats}</span>
-                </div>
-            </div>
-            <div class="controls">
-                <div class="encounter-buttons">
-                    <button class="btn-encounter-none encounter-none" data-index="${index}">遭遇なし</button>
-                    <button class="btn-encounter encounter" data-index="${index}">遭遇</button>
-                </div>
-            </div>
-        `;
+        content.innerHTML = buildTabContent(record, index);
         tabsContent.appendChild(content);
     });
 
@@ -156,17 +183,16 @@ function renderTabs() {
     addTab.appendChild(addButton);
     tabsList.appendChild(addTab);
 
-    document.querySelectorAll('.editable-name').forEach(el => {
+    tabsContent.querySelectorAll('.editable-name').forEach(el => {
         el.addEventListener('input', (e) => {
-            // 入力中にタブのテキストをリアルタイム更新
             const idx = parseInt(e.target.dataset.index, 10);
-            const tabButtons = document.querySelectorAll('#tabs-list li:not(:last-child) button');
+            const tabButtons = tabsList.querySelectorAll('li:not(:last-child) button');
             if (tabButtons[idx]) tabButtons[idx].textContent = e.target.textContent || '';
         });
         el.addEventListener('blur', updateName);
     });
 
-    document.querySelectorAll('.edit-toggle').forEach(button => {
+    tabsContent.querySelectorAll('.edit-toggle').forEach(button => {
         button.addEventListener('click', (e) => {
             const idx = parseInt(e.currentTarget.dataset.index, 10);
             editModes[idx] = !editModes[idx];
@@ -174,9 +200,8 @@ function renderTabs() {
         });
     });
 
-    document.querySelectorAll('.editable-field').forEach(el => {
+    tabsContent.querySelectorAll('.editable-field').forEach(el => {
         el.addEventListener('focus', (e) => {
-            // フォーカス時に全選択
             const range = document.createRange();
             range.selectNodeContents(e.target);
             const sel = window.getSelection();
@@ -189,27 +214,26 @@ function renderTabs() {
         });
     });
 
-    document.querySelectorAll('.encounter-none').forEach(button => {
-        button.addEventListener('click', () => updateRounds(button.dataset.index, false));
+    tabsContent.querySelectorAll('.encounter-none').forEach(btn => {
+        btn.addEventListener('click', () => addRoundNoEncounter(parseInt(btn.dataset.index, 10)));
     });
 
-    document.querySelectorAll('.encounter').forEach(button => {
-        button.addEventListener('click', () => handleEncounter(button.dataset.index));
+    tabsContent.querySelectorAll('.encounter').forEach(btn => {
+        btn.addEventListener('click', () => handleEncounter(parseInt(btn.dataset.index, 10)));
     });
 
-    document.querySelectorAll('.undo').forEach(button => {
-        button.addEventListener('click', undoRecord);
+    tabsContent.querySelectorAll('.undo').forEach(btn => {
+        btn.addEventListener('click', undoRecord);
     });
 
-    document.querySelectorAll('.redo').forEach(button => {
-        button.addEventListener('click', redoRecord);
+    tabsContent.querySelectorAll('.redo').forEach(btn => {
+        btn.addEventListener('click', redoRecord);
     });
 
-    document.querySelectorAll('.delete').forEach(button => {
-        button.addEventListener('click', (e) => {
-            const btn = e.currentTarget;
+    tabsContent.querySelectorAll('.delete').forEach(btn => {
+        btn.addEventListener('click', () => {
             if (btn.dataset.confirm === 'true') {
-                deleteRecord(btn.dataset.index);
+                deleteRecord(parseInt(btn.dataset.index, 10));
             } else {
                 btn.dataset.confirm = 'true';
                 btn.textContent = '削除する';
@@ -238,18 +262,14 @@ function updateField(event) {
     const field = event.target.dataset.field;
     const value = parseInt(event.target.textContent.trim(), 10);
 
-    if (isNaN(value) || value < 0) {
-        // 無効値の場合は元に戻す
+    if (!Number.isFinite(value) || value < 0) {
         event.target.textContent = records[index][field];
         return;
     }
 
-    // 履歴を保存
     pushHistory(records[index]);
-
     records[index][field] = value;
-    // 確率の再計算
-    records[index].probability = records[index].encounters / records[index].totalRounds || 0;
+    records[index].probability = calcProbability(records[index]);
     records[index].lastUpdated = new Date().toLocaleString();
     saveRecords();
     renderTabs();
@@ -257,14 +277,14 @@ function updateField(event) {
 
 // データ名を更新する
 function updateName(event) {
-    const index = event.target.dataset.index;
+    const index = parseInt(event.target.dataset.index, 10);
     const newName = event.target.textContent.trim();
     if (newName) {
         records[index].name = newName;
         records[index].lastUpdated = new Date().toLocaleString();
         saveRecords();
     } else {
-        event.target.textContent = records[index].name; // 空の場合は元に戻す
+        event.target.textContent = records[index].name;
     }
 }
 
@@ -272,115 +292,110 @@ function updateName(event) {
 function handleEncounter(index) {
     const record = records[index];
 
-    // 入力フォームを表示
-    const inputContainer = document.createElement('div');
-    inputContainer.className = 'drop-input-container';
-    inputContainer.innerHTML = `
+    const container = document.createElement('div');
+    container.className = 'drop-input-container';
+    container.innerHTML = `
         <div class="drop-input-modal">
-            <label for="drop-count">ドロップ数を入力してください (0の場合は敗北):</label>
-            <input type="number" id="drop-count" min="0" class="form-control">
-            <button id="submit-drop" class="btn btn-primary">決定</button>
-            <button id="cancel-drop" class="btn btn-secondary">キャンセル</button>
+            <label>ドロップ数を入力してください<br><small>(0の場合は敗北)</small></label>
+            <input type="number" class="drop-count-input form-control" min="0" value="0">
+            <div style="display:flex;gap:8px;margin-top:10px;justify-content:center">
+                <button class="btn btn-primary submit-drop">決定</button>
+                <button class="btn btn-secondary cancel-drop">キャンセル</button>
+            </div>
         </div>
     `;
-    document.body.appendChild(inputContainer);
+    document.body.appendChild(container);
 
-    // 入力処理
-    document.getElementById('submit-drop').addEventListener('click', () => {
-        const drops = parseInt(document.getElementById('drop-count').value, 10);
-        if (isNaN(drops) || drops < 0) {
-            alert("有効な数値を入力してください。");
+    const input = container.querySelector('.drop-count-input');
+    input.focus();
+    input.select();
+
+    const close = () => document.body.removeChild(container);
+
+    container.querySelector('.cancel-drop').addEventListener('click', close);
+    container.addEventListener('click', (e) => { if (e.target === container) close(); });
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter')  container.querySelector('.submit-drop').click();
+        if (e.key === 'Escape') close();
+    });
+
+    container.querySelector('.submit-drop').addEventListener('click', () => {
+        const drops = parseInt(input.value, 10);
+        if (!Number.isFinite(drops) || drops < 0) {
+            input.classList.add('is-invalid');
             return;
         }
 
-        // 履歴を保存
         pushHistory(record);
 
-        record.totalRounds += 1;
-        record.encounters += 1;
-        record.minRounds = record.minRounds === null || record.minRounds === undefined ? record.lastEncounterRounds : Math.min(record.minRounds, record.lastEncounterRounds);
-        record.maxRounds = record.maxRounds === null || record.maxRounds === undefined ? record.lastEncounterRounds : Math.max(record.maxRounds, record.lastEncounterRounds);
-        record.lastEncounterRounds = 0; // 遭遇したのでリセット
+        const prevStreak = record.lastEncounterRounds;
+        record.totalRounds    += 1;
+        record.encounters     += 1;
+        if (record.encounters === 1) {
+            record.minRounds = prevStreak;
+            record.maxRounds = prevStreak;
+        } else {
+            record.minRounds = Math.min(record.minRounds, prevStreak);
+            record.maxRounds = Math.max(record.maxRounds, prevStreak);
+        }
+        record.lastEncounterRounds = 0;
 
         if (drops === 0) {
-            record.defeats += 1; // 敗北数を増加
+            record.defeats    += 1;
         } else {
-            record.totalDrops += drops; // 総ドロップ数を増加
+            record.totalDrops += drops;
         }
 
-        record.probability = record.encounters / record.totalRounds || 0;
-        record.lastUpdated = new Date().toLocaleString();
+        record.probability  = calcProbability(record);
+        record.lastUpdated  = new Date().toLocaleString();
         saveRecords();
         renderTabs();
-
-        // 入力フォームを削除
-        document.body.removeChild(inputContainer);
-    });
-
-    // キャンセル処理
-    document.getElementById('cancel-drop').addEventListener('click', () => {
-        document.body.removeChild(inputContainer);
+        close();
     });
 }
 
-// 周回数を更新する
-function updateRounds(index, isEncounter) {
+// 遭遇なしボタンの処理
+function addRoundNoEncounter(index) {
     const record = records[index];
-
-    // 履歴を保存
     pushHistory(record);
 
-    record.totalRounds += 1;
+    record.totalRounds        += 1;
+    record.lastEncounterRounds += 1;
+    record.minRounds = Math.min(record.minRounds || Infinity, record.lastEncounterRounds);
+    record.maxRounds = Math.max(record.maxRounds || 0,        record.lastEncounterRounds);
 
-    if (isEncounter) {
-        record.encounters += 1;
-        record.minRounds = record.minRounds === null || record.minRounds === undefined ? 0 : Math.min(record.minRounds, record.lastEncounterRounds);
-        record.maxRounds = record.maxRounds === null || record.maxRounds === undefined ? 0 : Math.max(record.maxRounds, record.lastEncounterRounds);
-        record.lastEncounterRounds = 0; // 遭遇したのでリセット
-    } else {
-        record.lastEncounterRounds += 1; // 遭遇なしの場合、ハマりを増加
-
-        // 遭遇なしのたびに最大・最小ハマりを更新
-        record.minRounds = record.minRounds === null || record.minRounds === undefined ? record.lastEncounterRounds : Math.min(record.minRounds, record.lastEncounterRounds);
-        record.maxRounds = record.maxRounds === null || record.maxRounds === undefined ? record.lastEncounterRounds : Math.max(record.maxRounds, record.lastEncounterRounds);
-    }
-
-    record.probability = record.encounters / record.totalRounds || 0;
-    record.lastUpdated = new Date().toLocaleString();
+    record.probability  = calcProbability(record);
+    record.lastUpdated  = new Date().toLocaleString();
     saveRecords();
     renderTabs();
 }
 
 // Undo機能
 function undoRecord(event) {
-    const index = event.target.dataset.index;
+    const index  = parseInt(event.currentTarget.dataset.index, 10);
     const record = records[index];
+    if (record.history.length === 0) return;
 
-    if (record.history.length > 0) {
-        const { history, future, ...currentState } = record;
-        record.future.push(currentState);
-        if (record.future.length > 5) record.future.shift();
-        const previousState = record.history.pop();
-        Object.assign(record, previousState);
-        saveRecords();
-        renderTabs();
-    }
+    const { history, future, ...currentState } = record;
+    record.future.push(currentState);
+    if (record.future.length > MAX_HISTORY) record.future.shift();
+    Object.assign(record, record.history.pop());
+    saveRecords();
+    renderTabs();
 }
 
 // Redo機能
 function redoRecord(event) {
-    const index = event.target.dataset.index;
+    const index  = parseInt(event.currentTarget.dataset.index, 10);
     const record = records[index];
+    if (record.future.length === 0) return;
 
-    if (record.future.length > 0) {
-        const { history, future, ...currentState } = record;
-        record.history.push(currentState);
-        if (record.history.length > 5) record.history.shift();
-        const nextState = record.future.pop();
-        Object.assign(record, nextState);
-        saveRecords();
-        renderTabs();
-    }
+    const { history, future, ...currentState } = record;
+    record.history.push(currentState);
+    if (record.history.length > MAX_HISTORY) record.history.shift();
+    Object.assign(record, record.future.pop());
+    saveRecords();
+    renderTabs();
 }
 
 // 記録を削除する
