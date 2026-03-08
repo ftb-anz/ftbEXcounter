@@ -33,6 +33,19 @@ function calcProbability(record) {
     return record.totalRounds > 0 ? record.encounters / record.totalRounds : 0;
 }
 
+/** モーダルを開くヘルパー。背景クリックで閉じる。{ container, close } を返す */
+function openModal(innerHtml) {
+    const container = document.createElement('div');
+    container.className = 'drop-input-container';
+    container.innerHTML = innerHtml;
+    document.body.appendChild(container);
+    const close = () => {
+        if (container.parentNode) document.body.removeChild(container);
+    };
+    container.addEventListener('click', (e) => { if (e.target === container) close(); });
+    return { container, close };
+}
+
 // ローカルストレージにデータを保存する
 function saveRecords() {
     const recordsToSave = records.map(record => {
@@ -51,8 +64,9 @@ function loadRecords() {
         if (!Array.isArray(parsed)) return;
         records = parsed.map(record => ({
             ...record,
-            defeats:    record.defeats    ?? 0,
-            totalDrops: record.totalDrops ?? 0,
+            defeats:      record.defeats      ?? 0,
+            totalDrops:   record.totalDrops   ?? 0,
+            encounterLog: record.encounterLog ?? [],
             history: [],
             future:  [],
         }));
@@ -67,7 +81,7 @@ function loadRecords() {
 // 操作前に履歴を保存（futureをクリア）
 function pushHistory(record) {
     const { history, future, ...state } = record;
-    record.history.push(state);
+    record.history.push({ ...state, encounterLog: [...(state.encounterLog || [])] });
     if (record.history.length > MAX_HISTORY) record.history.shift();
     record.future = [];
 }
@@ -86,7 +100,8 @@ function addRecord() {
         history: [],
         future: [],
         defeats: 0,
-        totalDrops: 0
+        totalDrops: 0,
+        encounterLog: [],
     };
     records.push(newRecord);
     editModes.push(false);
@@ -126,6 +141,7 @@ function buildTabContent(record, index) {
             </div>
         </div>
         <div class="edit-toggle-bar">
+            <button class="btn-history history" data-index="${index}">📋 遭遇履歴</button>
             <button class="btn-edit-toggle edit-toggle${isEditing ? ' active' : ''}" data-index="${index}">✏️ 編集</button>
         </div>
         <div class="stats-grid${isEditing ? ' editing' : ''}">
@@ -135,9 +151,9 @@ function buildTabContent(record, index) {
                 <span class="stat-label">遭遇確率</span>
                 <span class="stat-value">${(record.probability * 100).toFixed(2)}%</span>
             </div>
-            ${buildStatCard('現在ハマり',  record.lastEncounterRounds,  index, 'lastEncounterRounds',  isEditing, 'highlight')}
-            ${buildStatCard('最小ハマり',  record.minRounds,            index, 'minRounds',           isEditing)}
-            ${buildStatCard('最大ハマり',  record.maxRounds,            index, 'maxRounds',           isEditing)}
+            ${buildStatCard('現在ハマり',  record.lastEncounterRounds,              index, 'lastEncounterRounds',  isEditing, 'highlight')}
+            ${buildStatCard('最小ハマり',  record.encounters > 0 ? record.minRounds : '-', index, 'minRounds',           isEditing)}
+            ${buildStatCard('最大ハマり',  record.maxRounds,                        index, 'maxRounds',           isEditing)}
             ${buildStatCard('総ドロップ数', record.totalDrops,        index, 'totalDrops',          isEditing)}
             ${buildStatCard('敗北数',      record.defeats,              index, 'defeats',             isEditing)}
         </div>
@@ -230,38 +246,14 @@ function renderTabs() {
         btn.addEventListener('click', redoRecord);
     });
 
+    tabsContent.querySelectorAll('.history').forEach(btn => {
+        btn.addEventListener('click', () => showHistory(parseInt(btn.dataset.index, 10)));
+    });
+
     tabsContent.querySelectorAll('.delete').forEach(btn => {
         btn.addEventListener('click', () => {
             if (btn.dataset.confirm === 'true') {
-                const idx = parseInt(btn.dataset.index, 10);
-                const name = escapeHtml(records[idx].name);
-
-                const container = document.createElement('div');
-                container.className = 'drop-input-container';
-                container.innerHTML = `
-                    <div class="drop-input-modal">
-                        <p style="margin:0 0 12px;text-align:center">「${name}」を削除しますか？<br><small style="white-space:nowrap">この操作は元に戻せません</small></p>
-                        <div style="display:flex;gap:8px;justify-content:center">
-                            <button class="btn btn-danger confirm-delete-ok">削除する</button>
-                            <button class="btn btn-secondary confirm-delete-cancel">キャンセル</button>
-                        </div>
-                    </div>
-                `;
-                document.body.appendChild(container);
-
-                const close = () => {
-                    document.body.removeChild(container);
-                    btn.dataset.confirm = 'false';
-                    btn.textContent = '×';
-                    btn.classList.remove('confirming');
-                };
-
-                container.querySelector('.confirm-delete-cancel').addEventListener('click', close);
-                container.addEventListener('click', (e) => { if (e.target === container) close(); });
-                container.querySelector('.confirm-delete-ok').addEventListener('click', () => {
-                    document.body.removeChild(container);
-                    deleteRecord(idx);
-                });
+                confirmDelete(parseInt(btn.dataset.index, 10), btn);
             } else {
                 btn.dataset.confirm = 'true';
                 btn.textContent = '削除する';
@@ -320,9 +312,7 @@ function updateName(event) {
 function handleEncounter(index) {
     const record = records[index];
 
-    const container = document.createElement('div');
-    container.className = 'drop-input-container';
-    container.innerHTML = `
+    const { container, close } = openModal(`
         <div class="drop-input-modal">
             <label>ドロップ数を入力してください<br><small style="white-space:nowrap">(0の場合は敗北)</small></label>
             <input type="number" class="drop-count-input form-control" min="0" value="0">
@@ -331,17 +321,13 @@ function handleEncounter(index) {
                 <button class="btn btn-secondary cancel-drop">キャンセル</button>
             </div>
         </div>
-    `;
-    document.body.appendChild(container);
+    `);
 
     const input = container.querySelector('.drop-count-input');
     input.focus();
     input.select();
 
-    const close = () => document.body.removeChild(container);
-
     container.querySelector('.cancel-drop').addEventListener('click', close);
-    container.addEventListener('click', (e) => { if (e.target === container) close(); });
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter')  container.querySelector('.submit-drop').click();
         if (e.key === 'Escape') close();
@@ -374,6 +360,14 @@ function handleEncounter(index) {
             record.totalDrops += drops;
         }
 
+        record.encounterLog.push({
+            no:          record.encounters,
+            streak:      prevStreak,
+            drops,
+            result:      drops === 0 ? '敗北' : '勝利',
+            totalRounds: record.totalRounds,
+        });
+
         record.probability  = calcProbability(record);
         record.lastUpdated  = new Date().toLocaleString();
         saveRecords();
@@ -382,15 +376,83 @@ function handleEncounter(index) {
     });
 }
 
+// 遭遇履歴モーダルを表示
+function showHistory(index) {
+    const record = records[index];
+    const log = record.encounterLog || [];
+
+    const rows = log.length === 0
+        ? '<tr><td colspan="5" class="history-empty">記録がありません</td></tr>'
+        : [...log].reverse().map(entry => `
+            <tr>
+                <td>${entry.no}</td>
+                <td>${entry.streak}</td>
+                <td>${entry.drops}</td>
+                <td class="result-${entry.result === '勝利' ? 'win' : 'lose'}">${entry.result}</td>
+                <td>${entry.totalRounds}</td>
+            </tr>`).join('');
+
+    const { container, close } = openModal(`
+        <div class="drop-input-modal history-modal">
+            <h3 class="history-title">📋 遭遇履歴：${escapeHtml(record.name)}</h3>
+            <div class="history-table-wrapper">
+                <table class="history-table">
+                    <thead>
+                        <tr>
+                            <th>No.</th>
+                            <th>ハマり</th>
+                            <th>ドロップ</th>
+                            <th>結果</th>
+                            <th>累計周回</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            </div>
+            <div style="margin-top:12px;text-align:center">
+                <button class="btn btn-secondary close-history">閉じる</button>
+            </div>
+        </div>
+    `);
+
+    container.querySelector('.close-history').addEventListener('click', close);
+    const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
+    document.addEventListener('keydown', onKey);
+}
+
+// 削除確認ダイアログを表示
+function confirmDelete(idx, btn) {
+    const name = escapeHtml(records[idx].name);
+    const { container, close } = openModal(`
+        <div class="drop-input-modal">
+            <p style="margin:0 0 12px;text-align:center">「${name}」を削除しますか？<br><small style="white-space:nowrap">この操作は元に戻せません</small></p>
+            <div style="display:flex;gap:8px;justify-content:center">
+                <button class="btn btn-danger confirm-delete-ok">削除する</button>
+                <button class="btn btn-secondary confirm-delete-cancel">キャンセル</button>
+            </div>
+        </div>
+    `);
+    const cancel = () => {
+        close();
+        btn.dataset.confirm = 'false';
+        btn.textContent = '×';
+        btn.classList.remove('confirming');
+    };
+    container.querySelector('.confirm-delete-cancel').addEventListener('click', cancel);
+    container.querySelector('.confirm-delete-ok').addEventListener('click', () => {
+        close();
+        deleteRecord(idx);
+    });
+}
+
 // 遭遇なしボタンの処理
 function addRoundNoEncounter(index) {
     const record = records[index];
     pushHistory(record);
 
-    record.totalRounds        += 1;
+    record.totalRounds         += 1;
     record.lastEncounterRounds += 1;
-    record.minRounds = Math.min(record.minRounds || Infinity, record.lastEncounterRounds);
-    record.maxRounds = Math.max(record.maxRounds || 0,        record.lastEncounterRounds);
+    record.maxRounds = Math.max(record.maxRounds || 0, record.lastEncounterRounds);
 
     record.probability  = calcProbability(record);
     record.lastUpdated  = new Date().toLocaleString();
@@ -405,7 +467,7 @@ function undoRecord(event) {
     if (record.history.length === 0) return;
 
     const { history, future, ...currentState } = record;
-    record.future.push(currentState);
+    record.future.push({ ...currentState, encounterLog: [...(currentState.encounterLog || [])] });
     if (record.future.length > MAX_HISTORY) record.future.shift();
     Object.assign(record, record.history.pop());
     saveRecords();
@@ -419,7 +481,7 @@ function redoRecord(event) {
     if (record.future.length === 0) return;
 
     const { history, future, ...currentState } = record;
-    record.history.push(currentState);
+    record.history.push({ ...currentState, encounterLog: [...(currentState.encounterLog || [])] });
     if (record.history.length > MAX_HISTORY) record.history.shift();
     Object.assign(record, record.future.pop());
     saveRecords();
