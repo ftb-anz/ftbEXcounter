@@ -141,8 +141,8 @@ function buildTabContent(record, index) {
             </div>
         </div>
         <div class="edit-toggle-bar">
-            <button class="btn-history history" data-index="${index}">📋 遭遇履歴</button>
-            <button class="btn-edit-toggle edit-toggle${isEditing ? ' active' : ''}" data-index="${index}">✏️ 編集</button>
+            <button class="btn-history history" data-index="${index}">履歴</button>
+            <button class="btn-edit-toggle edit-toggle${isEditing ? ' active' : ''}" data-index="${index}">編集</button>
         </div>
         <div class="stats-grid${isEditing ? ' editing' : ''}">
             ${buildStatCard('総周回数',    record.totalRounds,          index, 'totalRounds',         isEditing)}
@@ -394,7 +394,7 @@ function showHistory(index) {
 
     const { container, close } = openModal(`
         <div class="drop-input-modal history-modal">
-            <h3 class="history-title">📋 遭遇履歴：${escapeHtml(record.name)}</h3>
+            <h3 class="history-title">遭遇履歴：${escapeHtml(record.name)}</h3>
             <div class="history-table-wrapper">
                 <table class="history-table">
                     <thead>
