@@ -296,7 +296,7 @@ function handleEncounter(index) {
     container.className = 'drop-input-container';
     container.innerHTML = `
         <div class="drop-input-modal">
-            <label>ドロップ数を入力してください<br><small>(0の場合は敗北)</small></label>
+            <label>ドロップ数を入力してください<br><small style="white-space:nowrap">(0の場合は敗北)</small></label>
             <input type="number" class="drop-count-input form-control" min="0" value="0">
             <div style="display:flex;gap:8px;margin-top:10px;justify-content:center">
                 <button class="btn btn-primary submit-drop">決定</button>
