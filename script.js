@@ -233,7 +233,35 @@ function renderTabs() {
     tabsContent.querySelectorAll('.delete').forEach(btn => {
         btn.addEventListener('click', () => {
             if (btn.dataset.confirm === 'true') {
-                deleteRecord(parseInt(btn.dataset.index, 10));
+                const idx = parseInt(btn.dataset.index, 10);
+                const name = escapeHtml(records[idx].name);
+
+                const container = document.createElement('div');
+                container.className = 'drop-input-container';
+                container.innerHTML = `
+                    <div class="drop-input-modal">
+                        <p style="margin:0 0 12px;text-align:center">「${name}」を削除しますか？<br><small style="white-space:nowrap">この操作は元に戻せません</small></p>
+                        <div style="display:flex;gap:8px;justify-content:center">
+                            <button class="btn btn-danger confirm-delete-ok">削除する</button>
+                            <button class="btn btn-secondary confirm-delete-cancel">キャンセル</button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(container);
+
+                const close = () => {
+                    document.body.removeChild(container);
+                    btn.dataset.confirm = 'false';
+                    btn.textContent = '×';
+                    btn.classList.remove('confirming');
+                };
+
+                container.querySelector('.confirm-delete-cancel').addEventListener('click', close);
+                container.addEventListener('click', (e) => { if (e.target === container) close(); });
+                container.querySelector('.confirm-delete-ok').addEventListener('click', () => {
+                    document.body.removeChild(container);
+                    deleteRecord(idx);
+                });
             } else {
                 btn.dataset.confirm = 'true';
                 btn.textContent = '削除する';
