@@ -11,7 +11,21 @@
 <body>
     <header>
         <h1>EXカウンター</h1>
+        <div class="header-menu">
+            <button class="btn-hamburger" id="hamburger-btn" aria-label="メニュー">
+                <span></span><span></span><span></span>
+            </button>
+        </div>
+        <input type="file" id="import-file-input" accept=".json" style="display:none">
     </header>
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+    <nav class="sidebar" id="sidebar">
+        <button class="dropdown-item" id="export-btn">データをバックアップ</button>
+        <button class="dropdown-item" id="import-btn">データを復元</button>
+        <hr class="dropdown-divider">
+        <button class="dropdown-item" id="changelog-btn">更新履歴</button>
+        <div class="sidebar-author">あんず</div>
+    </nav>
     <main>
         <section id="tabs-container">
             <div class="tabs-list-wrapper">

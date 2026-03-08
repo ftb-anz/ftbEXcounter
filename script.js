@@ -33,7 +33,7 @@ function calcProbability(record) {
     return record.totalRounds > 0 ? record.encounters / record.totalRounds : 0;
 }
 
-/** モーダルを開くヘルパー。背景クリックで閉じる。{ container, close } を返す */
+/** モーダルを開くヘルパー。背景クリック・ESCで閉じる。{ container, close } を返す */
 function openModal(innerHtml) {
     const container = document.createElement('div');
     container.className = 'drop-input-container';
@@ -41,9 +41,22 @@ function openModal(innerHtml) {
     document.body.appendChild(container);
     const close = () => {
         if (container.parentNode) document.body.removeChild(container);
+        document.removeEventListener('keydown', onKey);
     };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    document.addEventListener('keydown', onKey);
     container.addEventListener('click', (e) => { if (e.target === container) close(); });
     return { container, close };
+}
+
+/** CHANGELOG.mdのMarkdownをHTMLに変換 */
+function parseMd(text) {
+    return text
+        .replace(/^## (.+)$/gm, '<h4 class="cl-version">$1</h4>')
+        .replace(/^# .+$/gm, '')
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>(\n|$))+/gs, m => `<ul>${m}</ul>`)
+        .replace(/\n{2,}/g, '');
 }
 
 // ローカルストレージにデータを保存する
@@ -409,15 +422,13 @@ function showHistory(index) {
                     <tbody>${rows}</tbody>
                 </table>
             </div>
-            <div style="margin-top:12px;text-align:center">
+            <div class="modal-actions">
                 <button class="btn btn-secondary close-history">閉じる</button>
             </div>
         </div>
     `);
 
     container.querySelector('.close-history').addEventListener('click', close);
-    const onKey = (e) => { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); } };
-    document.addEventListener('keydown', onKey);
 }
 
 // 削除確認ダイアログを表示
@@ -496,6 +507,131 @@ function deleteRecord(index) {
     saveRecords();
     renderTabs();
 }
+
+// ==============================
+// バックアップ / 復元
+// ==============================
+function exportRecords() {
+    const data = JSON.stringify(records.map(r => {
+        const { history, future, ...rest } = r;
+        return rest;
+    }), null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `excounter_backup_${new Date().toLocaleDateString('ja-JP').replace(/\//g, '-')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function importRecords(file) {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const parsed = JSON.parse(e.target.result);
+            if (!Array.isArray(parsed)) throw new Error('invalid format');
+
+            const { container, close } = openModal(`
+                <div class="drop-input-modal">
+                    <p style="margin:0 0 12px;text-align:center">
+                        データを復元します。<br>
+                        <small style="white-space:nowrap">現在のデータは上書きされます</small>
+                    </p>
+                    <div style="display:flex;gap:8px;justify-content:center">
+                        <button class="btn btn-danger confirm-import-ok">復元する</button>
+                        <button class="btn btn-secondary confirm-import-cancel">キャンセル</button>
+                    </div>
+                </div>
+            `);
+            container.querySelector('.confirm-import-cancel').addEventListener('click', close);
+            container.querySelector('.confirm-import-ok').addEventListener('click', () => {
+                records = parsed.map(record => ({
+                    ...record,
+                    defeats:      record.defeats      ?? 0,
+                    totalDrops:   record.totalDrops   ?? 0,
+                    encounterLog: record.encounterLog ?? [],
+                    history: [],
+                    future:  [],
+                }));
+                editModes = records.map(() => false);
+                activeTabIndex = 0;
+                saveRecords();
+                renderTabs();
+                close();
+            });
+        } catch {
+            alert('ファイルの読み込みに失敗しました。\nJSON形式が正しくありません。');
+        }
+    };
+    reader.readAsText(file);
+}
+
+// ==============================
+// 更新履歴 / 作者
+// ==============================
+async function showChangelog() {
+    try {
+        const res = await fetch('CHANGELOG.md');
+        if (!res.ok) throw new Error();
+        const html = parseMd(await res.text());
+
+        const { container, close } = openModal(`
+            <div class="drop-input-modal history-modal">
+                <h3 class="history-title">更新履歴</h3>
+                <div class="history-table-wrapper"><div class="cl-body">${html}</div></div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary close-cl">閉じる</button>
+                </div>
+            </div>
+        `);
+        container.querySelector('.close-cl').addEventListener('click', close);
+    } catch {
+        alert('更新履歴の読み込みに失敗しました。');
+    }
+}
+
+// ==============================
+// ハンバーガーメニュー
+// ==============================
+function openSidebar() {
+    const header  = document.querySelector('header');
+    const sidebar  = document.getElementById('sidebar');
+    const headerH  = header.offsetHeight;
+    sidebar.style.top    = headerH + 'px';
+    sidebar.style.height = `calc(100vh - ${headerH}px)`;
+    sidebar.classList.add('open');
+    document.getElementById('sidebar-backdrop').classList.add('open');
+}
+function closeSidebar() {
+    document.getElementById('sidebar').classList.remove('open');
+    document.getElementById('sidebar-backdrop').classList.remove('open');
+}
+
+document.getElementById('hamburger-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('sidebar').classList.contains('open') ? closeSidebar() : openSidebar();
+});
+document.getElementById('sidebar-backdrop').addEventListener('click', closeSidebar);
+
+document.getElementById('export-btn').addEventListener('click', () => {
+    exportRecords();
+    closeSidebar();
+});
+document.getElementById('import-btn').addEventListener('click', () => {
+    document.getElementById('import-file-input').click();
+    closeSidebar();
+});
+document.getElementById('import-file-input').addEventListener('change', (e) => {
+    if (e.target.files[0]) {
+        importRecords(e.target.files[0]);
+        e.target.value = '';
+    }
+});
+document.getElementById('changelog-btn').addEventListener('click', () => {
+    showChangelog();
+    closeSidebar();
+});
 
 // 初期化
 loadRecords();

@@ -15,11 +15,105 @@ header {
     color: #2d5a27;
     text-align: center;
     padding: 1rem;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 header h1 {
     margin: 0;
     font-size: clamp(1.2rem, 5vw, 2rem);
+}
+
+/* ハンバーガーメニュー */
+.header-menu {
+    position: absolute;
+    left: 1rem;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.btn-hamburger {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+}
+.btn-hamburger span {
+    display: block;
+    width: 22px;
+    height: 2px;
+    background: #2d5a27;
+    border-radius: 2px;
+}
+.btn-hamburger:hover {
+    background: rgba(0,0,0,0.08);
+}
+
+/* サイドバー */
+.sidebar-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.3);
+    z-index: 199;
+}
+.sidebar-backdrop.open {
+    display: block;
+}
+
+.sidebar {
+    position: fixed;
+    left: 0;
+    top: 0; /* JSで上書き */
+    height: 100vh; /* JSで上書き */
+    background: #fff;
+    border-right: 1px solid #cde0cb;
+    box-shadow: 4px 0 16px rgba(0,0,0,0.15);
+    width: 240px;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    padding: 8px 0;
+    overflow: hidden;
+}
+.sidebar.open {
+    transform: translateX(0);
+}
+
+.sidebar-author {
+    position: absolute;
+    bottom: 12px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 0.8rem;
+    color: #999;
+}
+.dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 10px 16px;
+    text-align: left;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: #2d5a27;
+    white-space: nowrap;
+    box-sizing: border-box;
+}
+.dropdown-item:hover {
+    background: #eef7ee;
+}
+.dropdown-divider {
+    margin: 0;
+    border-color: #cde0cb;
 }
 
 main {
@@ -602,3 +696,37 @@ button:hover {
 
 .result-win  { color: #2d8a4e; font-weight: bold; }
 .result-lose { color: #c0392b; font-weight: bold; }
+
+.modal-actions {
+    margin-top: 12px;
+    text-align: center;
+}
+
+/* 更新履歴モーダル */
+.cl-body {
+    padding: 8px 12px;
+    text-align: left;
+    line-height: 1.7;
+}
+.cl-version {
+    margin: 12px 0 4px;
+    font-size: 0.95rem;
+    color: #2d5a27;
+    border-bottom: 1px solid #cde0cb;
+    padding-bottom: 4px;
+}
+.cl-body ul {
+    list-style: none;
+    margin: 0 0 8px;
+    padding-left: 0;
+    font-size: 0.88rem;
+}
+.cl-body li {
+    display: flex;
+    gap: 0.4em;
+    margin-bottom: 2px;
+}
+.cl-body li::before {
+    content: "•";
+    flex-shrink: 0;
+}
