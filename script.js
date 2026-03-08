@@ -315,7 +315,7 @@ function handleEncounter(index) {
     const { container, close } = openModal(`
         <div class="drop-input-modal">
             <label>ドロップ数を入力してください<br><small style="white-space:nowrap">(0の場合は敗北)</small></label>
-            <input type="number" class="drop-count-input form-control" min="0" value="0">
+            <input type="number" class="drop-count-input form-control" min="0" value="1">
             <div style="display:flex;gap:8px;margin-top:10px;justify-content:center">
                 <button class="btn btn-primary submit-drop">決定</button>
                 <button class="btn btn-secondary cancel-drop">キャンセル</button>
