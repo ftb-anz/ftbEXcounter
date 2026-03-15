@@ -2,3 +2,4 @@ node_modules/
 data/
 .wrangler/
 CLOUDFLARE_SETUP.md
+backups/

@@ -1,4 +1,5 @@
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+let schemaReadyPromise = null;
 
 function json(data, status = 200, corsOrigin = '*') {
     return new Response(JSON.stringify(data), {
@@ -28,7 +29,7 @@ function getCorsOrigin(request, allowedOrigins) {
 
 async function getRecordsByUuid(db, uuid) {
     const row = await db
-        .prepare('SELECT uuid, records_json, updated_at FROM user_records WHERE uuid = ?1')
+        .prepare('SELECT uuid, records_json, updated_at, revision FROM user_records WHERE uuid = ?1')
         .bind(uuid)
         .first();
 
@@ -46,19 +47,50 @@ async function getRecordsByUuid(db, uuid) {
         uuid: row.uuid,
         records,
         updatedAt: row.updated_at,
+        revision: Number.isFinite(row.revision) ? row.revision : 0,
     };
 }
 
 async function createEmptyRecord(db, uuid) {
     const now = new Date().toISOString();
     await db
-        .prepare('INSERT INTO user_records (uuid, records_json, updated_at) VALUES (?1, ?2, ?3)')
-        .bind(uuid, '[]', now)
+        .prepare('INSERT INTO user_records (uuid, records_json, updated_at, revision) VALUES (?1, ?2, ?3, ?4)')
+        .bind(uuid, '[]', now, 0)
         .run();
+}
+
+async function ensureSchema(db) {
+    if (!schemaReadyPromise) {
+        schemaReadyPromise = db
+            .prepare(`
+                CREATE TABLE IF NOT EXISTS user_records (
+                    uuid TEXT PRIMARY KEY,
+                    records_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL,
+                    revision INTEGER NOT NULL DEFAULT 0
+                )
+            `)
+            .run()
+            .then(() =>
+                db.prepare('ALTER TABLE user_records ADD COLUMN revision INTEGER NOT NULL DEFAULT 0').run()
+                    .catch(() => {})
+            )
+            .catch((e) => {
+                schemaReadyPromise = null;
+                throw e;
+            });
+    }
+    await schemaReadyPromise;
 }
 
 export default {
     async fetch(request, env) {
+        if (!env.DB) {
+            return json({ error: 'database binding is not configured' }, 500, 'null');
+        }
+
+        await ensureSchema(env.DB);
+
         const url = new URL(request.url);
         const corsOrigin = getCorsOrigin(request, env.ALLOWED_ORIGINS);
         const requestOrigin = request.headers.get('Origin') || '';
@@ -92,15 +124,15 @@ export default {
             if (requestedUuid) {
                 const found = await getRecordsByUuid(env.DB, requestedUuid);
                 if (found) {
-                    return json({ uuid: found.uuid, records: found.records, created: false }, 200, corsOrigin);
+                    return json({ uuid: found.uuid, records: found.records, revision: found.revision, created: false }, 200, corsOrigin);
                 }
                 await createEmptyRecord(env.DB, requestedUuid);
-                return json({ uuid: requestedUuid, records: [], created: true }, 200, corsOrigin);
+                return json({ uuid: requestedUuid, records: [], revision: 0, created: true }, 200, corsOrigin);
             }
 
             const uuid = crypto.randomUUID();
             await createEmptyRecord(env.DB, uuid);
-            return json({ uuid, records: [], created: true }, 200, corsOrigin);
+            return json({ uuid, records: [], revision: 0, created: true }, 200, corsOrigin);
         }
 
         const match = url.pathname.match(/^\/api\/records\/([0-9a-fA-F-]+)$/);
@@ -133,20 +165,33 @@ export default {
                 return json({ error: 'records must be an array' }, 400, corsOrigin);
             }
 
-            const now = new Date().toISOString();
-            await env.DB
-                .prepare(`
-                    INSERT INTO user_records (uuid, records_json, updated_at)
-                    VALUES (?1, ?2, ?3)
-                    ON CONFLICT(uuid)
-                    DO UPDATE SET
-                        records_json = excluded.records_json,
-                        updated_at = excluded.updated_at
-                `)
-                .bind(uuid, JSON.stringify(body.records), now)
-                .run();
+            const clientRevision = Number.isFinite(body?.clientRevision) ? body.clientRevision : null;
+            const force = body?.force === true;
 
-            return json({ ok: true, updatedAt: now }, 200, corsOrigin);
+            const current = await getRecordsByUuid(env.DB, uuid);
+            if (current && !force && clientRevision !== null && clientRevision !== current.revision) {
+                return json({
+                    error: 'revision conflict',
+                    serverData: current,
+                }, 409, corsOrigin);
+            }
+
+            const now = new Date().toISOString();
+            const nextRevision = current ? (current.revision + 1) : 1;
+
+            if (current) {
+                await env.DB
+                    .prepare('UPDATE user_records SET records_json = ?1, updated_at = ?2, revision = ?3 WHERE uuid = ?4')
+                    .bind(JSON.stringify(body.records), now, nextRevision, uuid)
+                    .run();
+            } else {
+                await env.DB
+                    .prepare('INSERT INTO user_records (uuid, records_json, updated_at, revision) VALUES (?1, ?2, ?3, ?4)')
+                    .bind(uuid, JSON.stringify(body.records), now, nextRevision)
+                    .run();
+            }
+
+            return json({ ok: true, updatedAt: now, revision: nextRevision }, 200, corsOrigin);
         }
 
         return json({ error: 'method not allowed' }, 405, corsOrigin);

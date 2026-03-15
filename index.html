@@ -16,6 +16,7 @@
                 <span></span><span></span><span></span>
             </button>
         </div>
+        <div id="sync-status" class="header-sync-status status-synced" aria-live="polite">同期済</div>
     </header>
     <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
     <nav class="sidebar" id="sidebar">
@@ -40,7 +41,8 @@
     <script>
         // GitHub Pagesで利用する際はWorkerのURLを設定する
         window.EXCOUNTER_API_BASE_URL = 'https://mnst-excounter-api.ftb-excounter.workers.dev';
-    </script>
+        // window.EXCOUNTER_API_BASE_URL = 'http://127.0.0.1:8787';
+        </script>
     <script src="script.js"></script>
-</body>
-</html>
+            window.EXCOUNTER_API_BASE_URL = 'https://mnst-excounter-api.ftb-excounter.workers.dev';
+            // window.EXCOUNTER_API_BASE_URL = 'http://127.0.0.1:8787';

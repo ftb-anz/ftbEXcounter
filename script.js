@@ -5,6 +5,8 @@ const MAX_HISTORY = 5;
 const UUID_STORAGE_KEY = 'excounter_uuid';
 const API_BASE_URL = (window.EXCOUNTER_API_BASE_URL || '').trim().replace(/\/$/, '');
 const SAVE_DEBOUNCE_MS = 1200;
+const LOCAL_CACHE_KEY = 'excounter_cache_v2';
+const LOCAL_PENDING_KEY = 'excounter_pending_v2';
 
 // ==============================
 // 状態
@@ -13,9 +15,12 @@ const SAVE_DEBOUNCE_MS = 1200;
 // 記録データを管理する配列
 let records = [];
 let currentUuid = '';
+let serverRevision = 0;
 let saveTimerId = null;
 let saveInFlight = false;
 let saveQueued = false;
+let pendingSavePayload = null;
+let isConflictModalOpen = false;
 
 // タブを管理するための変数
 let activeTabIndex = 0;
@@ -64,6 +69,101 @@ function parseMd(text) {
         .replace(/^- (.+)$/gm, '<li>$1</li>')
         .replace(/(<li>.*<\/li>(\n|$))+/gs, m => `<ul>${m}</ul>`)
         .replace(/\n{2,}/g, '');
+}
+
+function updateSyncBanner(state, message = '') {
+    const statusEl = document.getElementById('sync-status');
+    if (!statusEl) return;
+
+    const normalizedState = state === 'hidden' ? 'synced' : state;
+    const labels = {
+        synced: '同期済',
+        syncing: '同期中',
+        offline: 'オフライン',
+        conflict: 'オフライン',
+    };
+
+    statusEl.classList.remove('status-synced', 'status-syncing', 'status-offline');
+    if (normalizedState === 'syncing') {
+        statusEl.classList.add('status-syncing');
+    } else if (normalizedState === 'offline' || normalizedState === 'conflict') {
+        statusEl.classList.add('status-offline');
+    } else {
+        statusEl.classList.add('status-synced');
+    }
+
+    statusEl.textContent = labels[normalizedState] || '同期済';
+    statusEl.title = message || statusEl.textContent;
+}
+
+function buildSavePayload() {
+    return {
+        uuid: currentUuid,
+        records: toStorableRecords(),
+        clientRevision: serverRevision,
+        savedAt: Date.now(),
+    };
+}
+
+function saveLocalCache() {
+    if (!currentUuid) return;
+    const cache = {
+        uuid: currentUuid,
+        revision: serverRevision,
+        records: toStorableRecords(),
+        cachedAt: Date.now(),
+    };
+    localStorage.setItem(LOCAL_CACHE_KEY, JSON.stringify(cache));
+}
+
+function readLocalCache() {
+    try {
+        const raw = localStorage.getItem(LOCAL_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !Array.isArray(parsed.records)) return null;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function savePendingPayload(payload) {
+    pendingSavePayload = payload;
+    localStorage.setItem(LOCAL_PENDING_KEY, JSON.stringify(payload));
+}
+
+function clearPendingPayload() {
+    pendingSavePayload = null;
+    localStorage.removeItem(LOCAL_PENDING_KEY);
+}
+
+function loadPendingPayload() {
+    if (pendingSavePayload) return pendingSavePayload;
+    try {
+        const raw = localStorage.getItem(LOCAL_PENDING_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || !parsed.uuid || !Array.isArray(parsed.records)) return null;
+        pendingSavePayload = parsed;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function summarizeRecords(data) {
+    const list = Array.isArray(data) ? data : [];
+    const totals = list.reduce((acc, r) => {
+        acc.rounds += Number.isFinite(r.totalRounds) ? r.totalRounds : 0;
+        acc.encounters += Number.isFinite(r.encounters) ? r.encounters : 0;
+        return acc;
+    }, { rounds: 0, encounters: 0 });
+    return {
+        tabs: list.length,
+        rounds: totals.rounds,
+        encounters: totals.encounters,
+    };
 }
 
 /** API URLを組み立てる */
@@ -147,20 +247,42 @@ async function flushPendingSave(forceKeepalive = false) {
         saveQueued = true;
         return;
     }
-    if (!currentUuid) return;
+    const payload = loadPendingPayload() || buildSavePayload();
+    if (!payload.uuid) return;
 
     saveInFlight = true;
+    updateSyncBanner('syncing', '同期中...');
     try {
-        const res = await fetch(buildApiUrl(`/api/records/${encodeURIComponent(currentUuid)}`), {
+        const res = await fetch(buildApiUrl(`/api/records/${encodeURIComponent(payload.uuid)}`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ records: toStorableRecords() }),
+            body: JSON.stringify({
+                records: payload.records,
+                clientRevision: payload.clientRevision,
+                force: false,
+            }),
             keepalive: forceKeepalive,
         });
-        if (!res.ok) {
-            console.error('サーバーへの保存に失敗しました:', res.status);
+        if (res.status === 409) {
+            const conflictData = await res.json();
+            savePendingPayload(payload);
+            await showConflictModal(payload, conflictData);
+            return;
         }
+        if (!res.ok) {
+            savePendingPayload(payload);
+            updateSyncBanner('offline', '接続エラー: 未同期の変更があります');
+            console.error('サーバーへの保存に失敗しました:', res.status);
+            return;
+        }
+        const body = await res.json();
+        serverRevision = Number.isFinite(body.revision) ? body.revision : serverRevision;
+        clearPendingPayload();
+        saveLocalCache();
+        updateSyncBanner('hidden');
     } catch (e) {
+        savePendingPayload(payload);
+        updateSyncBanner('offline', 'オフライン: 未同期の変更があります');
         console.error('サーバーへの保存に失敗しました:', e);
     } finally {
         saveInFlight = false;
@@ -173,6 +295,8 @@ async function flushPendingSave(forceKeepalive = false) {
 
 /** 保存を一定時間にまとめる */
 function queueSave() {
+    saveLocalCache();
+    savePendingPayload(buildSavePayload());
     saveQueued = true;
     if (saveTimerId) {
         clearTimeout(saveTimerId);
@@ -194,29 +318,139 @@ function saveRecords() {
 async function setupSession() {
     const savedUuid = localStorage.getItem(UUID_STORAGE_KEY);
     const legacyRecords = readLegacyLocalRecords();
+    const localCache = readLocalCache();
 
     let endpoint = '/api/session';
     if (savedUuid && isValidUuid(savedUuid)) {
         endpoint += `?uuid=${encodeURIComponent(savedUuid)}`;
     }
 
-    const res = await fetch(buildApiUrl(endpoint));
-    if (!res.ok) throw new Error('セッションの取得に失敗しました。');
-    const session = await res.json();
+    try {
+        const res = await fetch(buildApiUrl(endpoint));
+        if (!res.ok) throw new Error('セッションの取得に失敗しました。');
+        const session = await res.json();
 
-    currentUuid = session.uuid;
-    localStorage.setItem(UUID_STORAGE_KEY, currentUuid);
+        currentUuid = session.uuid;
+        serverRevision = Number.isFinite(session.revision) ? session.revision : 0;
+        localStorage.setItem(UUID_STORAGE_KEY, currentUuid);
 
-    if (session.created && legacyRecords.length > 0) {
-        records = legacyRecords;
-        editModes = records.map(() => false);
-        await flushPendingSave();
-        localStorage.removeItem('records');
-    } else {
-        records = normalizeRecords(session.records);
-        editModes = records.map(() => false);
+        if (session.created && legacyRecords.length > 0) {
+            records = legacyRecords;
+            editModes = records.map(() => false);
+            saveLocalCache();
+            savePendingPayload(buildSavePayload());
+            await flushPendingSave();
+            localStorage.removeItem('records');
+        } else {
+            records = normalizeRecords(session.records);
+            editModes = records.map(() => false);
+            saveLocalCache();
+        }
+
+        updateSyncBanner('hidden');
+    } catch (e) {
+        if (localCache && Array.isArray(localCache.records)) {
+            currentUuid = localCache.uuid || savedUuid || '';
+            serverRevision = Number.isFinite(localCache.revision) ? localCache.revision : 0;
+            records = normalizeRecords(localCache.records);
+            editModes = records.map(() => false);
+            updateSyncBanner('offline', 'オフラインモード: ローカル保存データを表示中');
+        } else {
+            throw e;
+        }
     }
     updateUuidDisplay();
+}
+
+async function showConflictModal(localPayload, conflictResponse) {
+    if (isConflictModalOpen) return;
+    isConflictModalOpen = true;
+
+    const serverData = conflictResponse.serverData || {};
+    const localSummary = summarizeRecords(localPayload.records);
+    const serverSummary = summarizeRecords(serverData.records || []);
+
+    updateSyncBanner('conflict', '競合が発生しました: 保存内容を選択してください');
+
+    const { container, close } = openModal(`
+        <div class="drop-input-modal conflict-modal">
+            <h3 class="history-title">データ競合が発生しました</h3>
+            <p style="font-size:0.86rem;margin:0 0 8px">他の端末で更新された可能性があります。採用するデータを選択してください。</p>
+            <div class="conflict-summary">
+                <div class="conflict-panel">
+                    <h4>サーバー側</h4>
+                    <ul>
+                        <li>リビジョン: ${serverData.revision ?? '-'}</li>
+                        <li>タブ数: ${serverSummary.tabs}</li>
+                        <li>総周回数: ${serverSummary.rounds}</li>
+                        <li>遭遇回数: ${serverSummary.encounters}</li>
+                    </ul>
+                </div>
+                <div class="conflict-panel">
+                    <h4>この端末側</h4>
+                    <ul>
+                        <li>リビジョン: ${localPayload.clientRevision ?? '-'}</li>
+                        <li>タブ数: ${localSummary.tabs}</li>
+                        <li>総周回数: ${localSummary.rounds}</li>
+                        <li>遭遇回数: ${localSummary.encounters}</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="conflict-actions">
+                <button class="btn btn-secondary conflict-use-server">サーバーを採用</button>
+                <button class="btn btn-danger conflict-use-local">この端末で上書き</button>
+                <button class="btn btn-outline-secondary conflict-cancel">あとで決める</button>
+            </div>
+        </div>
+    `);
+
+    const finalize = () => {
+        isConflictModalOpen = false;
+        close();
+    };
+
+    container.querySelector('.conflict-cancel').addEventListener('click', () => {
+        updateSyncBanner('conflict', '未同期の競合データがあります');
+        finalize();
+    });
+
+    container.querySelector('.conflict-use-server').addEventListener('click', () => {
+        currentUuid = serverData.uuid || currentUuid;
+        serverRevision = Number.isFinite(serverData.revision) ? serverData.revision : serverRevision;
+        records = normalizeRecords(serverData.records || []);
+        editModes = records.map(() => false);
+        clearPendingPayload();
+        saveLocalCache();
+        renderTabs();
+        updateUuidDisplay();
+        updateSyncBanner('hidden');
+        finalize();
+    });
+
+    container.querySelector('.conflict-use-local').addEventListener('click', async () => {
+        try {
+            const res = await fetch(buildApiUrl(`/api/records/${encodeURIComponent(localPayload.uuid)}`), {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    records: localPayload.records,
+                    clientRevision: serverData.revision,
+                    force: true,
+                }),
+            });
+            if (!res.ok) throw new Error(`force save failed: ${res.status}`);
+            const body = await res.json();
+            serverRevision = Number.isFinite(body.revision) ? body.revision : serverRevision;
+            clearPendingPayload();
+            saveLocalCache();
+            updateSyncBanner('hidden');
+        } catch (e) {
+            console.error(e);
+            updateSyncBanner('offline', '上書き保存に失敗しました。接続を確認してください');
+        } finally {
+            finalize();
+        }
+    });
 }
 
 // 操作前に履歴を保存（futureをクリア）
@@ -697,13 +931,17 @@ async function switchToUuid(uuidInput) {
 
         const data = await res.json();
         currentUuid = data.uuid;
+        serverRevision = Number.isFinite(data.revision) ? data.revision : 0;
         records = normalizeRecords(data.records);
         editModes = records.map(() => false);
         activeTabIndex = 0;
 
         localStorage.setItem(UUID_STORAGE_KEY, currentUuid);
+        clearPendingPayload();
+        saveLocalCache();
         updateUuidDisplay();
         renderTabs();
+        updateSyncBanner('hidden');
         return true;
     } catch (e) {
         console.error(e);
@@ -792,9 +1030,13 @@ async function initializeApp() {
         }
         await setupSession();
         renderTabs();
+        if (loadPendingPayload()) {
+            updateSyncBanner('offline', '未同期データを再送中です...');
+            void flushPendingSave();
+        }
     } catch (e) {
         console.error(e);
-        alert('初期化に失敗しました。APIエンドポイント設定を確認してください。');
+        alert('初期化に失敗しました。ネットワークまたはAPIの状態を確認してください。');
     }
 }
 
@@ -818,6 +1060,19 @@ document.addEventListener('visibilitychange', () => {
         saveQueued = false;
         void flushPendingSave(true);
     }
+});
+
+window.addEventListener('online', () => {
+    if (loadPendingPayload()) {
+        updateSyncBanner('syncing', '再接続を検知: 同期中...');
+        void flushPendingSave();
+    } else {
+        updateSyncBanner('hidden');
+    }
+});
+
+window.addEventListener('offline', () => {
+    updateSyncBanner('offline', 'オフラインです: 変更は端末に一時保存されます');
 });
 
 void initializeApp();

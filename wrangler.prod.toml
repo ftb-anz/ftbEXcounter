@@ -1,0 +1,14 @@
+# Explicit production config.
+# Use only when releasing:
+#   wrangler deploy --config wrangler.prod.toml
+name = "mnst-excounter-api"
+main = "cloudflare/worker.js"
+compatibility_date = "2026-03-15"
+
+[vars]
+ALLOWED_ORIGINS = "https://ftb-anz.github.io"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mnst-excounter-db"
+database_id = "a366c2a2-3a31-4984-bf5b-4b7649f4a2a3"
