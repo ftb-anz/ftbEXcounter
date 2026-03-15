@@ -116,6 +116,18 @@ header h1 {
     border-color: #cde0cb;
 }
 
+.sidebar-uuid {
+    margin: 8px 16px 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid #cde0cb;
+    background: #f7fbf7;
+    color: #406d3b;
+    font-size: 0.74rem;
+    line-height: 1.4;
+    word-break: break-all;
+}
+
 main {
     padding: 1rem;
     max-width: 900px;

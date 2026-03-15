@@ -16,12 +16,11 @@
                 <span></span><span></span><span></span>
             </button>
         </div>
-        <input type="file" id="import-file-input" accept=".json" style="display:none">
     </header>
     <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
     <nav class="sidebar" id="sidebar">
-        <button class="dropdown-item" id="export-btn">データをバックアップ</button>
-        <button class="dropdown-item" id="import-btn">データを復元</button>
+        <button class="dropdown-item" id="uuid-access-btn">UUIDでデータを開く</button>
+        <div class="sidebar-uuid" id="sidebar-uuid-display">UUID: 読み込み中...</div>
         <hr class="dropdown-divider">
         <button class="dropdown-item" id="changelog-btn">更新履歴</button>
         <div class="sidebar-author">あんず</div>
@@ -38,6 +37,10 @@
             </div>
         </section>
     </main>
+    <script>
+        // GitHub Pagesで利用する際はWorkerのURLを設定する
+        window.EXCOUNTER_API_BASE_URL = 'https://mnst-excounter-api.ftb-excounter.workers.dev';
+    </script>
     <script src="script.js"></script>
 </body>
 </html>

@@ -2,6 +2,9 @@
 // 定数
 // ==============================
 const MAX_HISTORY = 5;
+const UUID_STORAGE_KEY = 'excounter_uuid';
+const API_BASE_URL = (window.EXCOUNTER_API_BASE_URL || '').trim().replace(/\/$/, '');
+const SAVE_DEBOUNCE_MS = 1200;
 
 // ==============================
 // 状態
@@ -9,6 +12,10 @@ const MAX_HISTORY = 5;
 
 // 記録データを管理する配列
 let records = [];
+let currentUuid = '';
+let saveTimerId = null;
+let saveInFlight = false;
+let saveQueued = false;
 
 // タブを管理するための変数
 let activeTabIndex = 0;
@@ -59,36 +66,157 @@ function parseMd(text) {
         .replace(/\n{2,}/g, '');
 }
 
-// ローカルストレージにデータを保存する
-function saveRecords() {
-    const recordsToSave = records.map(record => {
-        const { history, future, ...rest } = record; // history/futureを除外して保存
-        return rest;
-    });
-    localStorage.setItem('records', JSON.stringify(recordsToSave));
+/** API URLを組み立てる */
+function buildApiUrl(path) {
+    return `${API_BASE_URL}${path}`;
 }
 
-// ローカルストレージからデータを読み込む
-function loadRecords() {
+/** UUIDの形式チェック */
+function isValidUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+/** API向けの保存形を作成 */
+function toStorableRecords() {
+    return records.map(record => {
+        const { history, future, ...rest } = record;
+        return rest;
+    });
+}
+
+/** 保存データの正規化 */
+function normalizeRecord(record, idx = 0) {
+    const totalRounds = Number.isFinite(record?.totalRounds) ? record.totalRounds : 0;
+    const encounters = Number.isFinite(record?.encounters) ? record.encounters : 0;
+    const minRounds = Number.isFinite(record?.minRounds) ? record.minRounds : 0;
+    const maxRounds = Number.isFinite(record?.maxRounds) ? record.maxRounds : 0;
+    const lastEncounterRounds = Number.isFinite(record?.lastEncounterRounds) ? record.lastEncounterRounds : 0;
+    const defeats = Number.isFinite(record?.defeats) ? record.defeats : 0;
+    const totalDrops = Number.isFinite(record?.totalDrops) ? record.totalDrops : 0;
+
+    return {
+        name: typeof record?.name === 'string' && record.name.trim() ? record.name : `data${idx + 1}`,
+        totalRounds,
+        encounters,
+        minRounds,
+        maxRounds,
+        probability: totalRounds > 0 ? encounters / totalRounds : 0,
+        lastUpdated: typeof record?.lastUpdated === 'string' ? record.lastUpdated : new Date().toLocaleString(),
+        lastEncounterRounds,
+        history: [],
+        future: [],
+        defeats,
+        totalDrops,
+        encounterLog: Array.isArray(record?.encounterLog) ? record.encounterLog : [],
+    };
+}
+
+/** 配列データを正規化 */
+function normalizeRecords(data) {
+    if (!Array.isArray(data)) return [];
+    return data.map((record, idx) => normalizeRecord(record, idx));
+}
+
+/** 旧localStorageデータの読み込み（初回移行用） */
+function readLegacyLocalRecords() {
     try {
         const saved = localStorage.getItem('records');
-        if (!saved) return;
+        if (!saved) return [];
         const parsed = JSON.parse(saved);
-        if (!Array.isArray(parsed)) return;
-        records = parsed.map(record => ({
-            ...record,
-            defeats:      record.defeats      ?? 0,
-            totalDrops:   record.totalDrops   ?? 0,
-            encounterLog: record.encounterLog ?? [],
-            history: [],
-            future:  [],
-        }));
-        editModes = records.map(() => false);
+        return normalizeRecords(parsed);
     } catch (e) {
-        console.error('データの読み込みに失敗しました:', e);
-        records = [];
-        editModes = [];
+        console.error('旧データの読み込みに失敗しました:', e);
+        return [];
     }
+}
+
+/** 現在のUUID表示を更新 */
+function updateUuidDisplay() {
+    const el = document.getElementById('sidebar-uuid-display');
+    if (!el) return;
+    if (currentUuid) {
+        el.textContent = `UUID: ${currentUuid}`;
+    } else {
+        el.textContent = 'UUID: 未割り当て';
+    }
+}
+
+/** 保存キューを即時反映 */
+async function flushPendingSave(forceKeepalive = false) {
+    if (saveInFlight) {
+        saveQueued = true;
+        return;
+    }
+    if (!currentUuid) return;
+
+    saveInFlight = true;
+    try {
+        const res = await fetch(buildApiUrl(`/api/records/${encodeURIComponent(currentUuid)}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ records: toStorableRecords() }),
+            keepalive: forceKeepalive,
+        });
+        if (!res.ok) {
+            console.error('サーバーへの保存に失敗しました:', res.status);
+        }
+    } catch (e) {
+        console.error('サーバーへの保存に失敗しました:', e);
+    } finally {
+        saveInFlight = false;
+        if (saveQueued) {
+            saveQueued = false;
+            await flushPendingSave(forceKeepalive);
+        }
+    }
+}
+
+/** 保存を一定時間にまとめる */
+function queueSave() {
+    saveQueued = true;
+    if (saveTimerId) {
+        clearTimeout(saveTimerId);
+    }
+    saveTimerId = setTimeout(() => {
+        saveTimerId = null;
+        if (!saveQueued) return;
+        saveQueued = false;
+        void flushPendingSave();
+    }, SAVE_DEBOUNCE_MS);
+}
+
+// 記録データを保存する
+function saveRecords() {
+    queueSave();
+}
+
+/** 初期セッションを作成または復元 */
+async function setupSession() {
+    const savedUuid = localStorage.getItem(UUID_STORAGE_KEY);
+    const legacyRecords = readLegacyLocalRecords();
+
+    let endpoint = '/api/session';
+    if (savedUuid && isValidUuid(savedUuid)) {
+        endpoint += `?uuid=${encodeURIComponent(savedUuid)}`;
+    }
+
+    const res = await fetch(buildApiUrl(endpoint));
+    if (!res.ok) throw new Error('セッションの取得に失敗しました。');
+    const session = await res.json();
+
+    currentUuid = session.uuid;
+    localStorage.setItem(UUID_STORAGE_KEY, currentUuid);
+
+    if (session.created && legacyRecords.length > 0) {
+        records = legacyRecords;
+        editModes = records.map(() => false);
+        await flushPendingSave();
+        localStorage.removeItem('records');
+    } else {
+        records = normalizeRecords(session.records);
+        editModes = records.map(() => false);
+    }
+    updateUuidDisplay();
 }
 
 // 操作前に履歴を保存（futureをクリア）
@@ -295,6 +423,8 @@ function updateField(event) {
     const field = event.target.dataset.field;
     const value = parseInt(event.target.textContent.trim(), 10);
 
+    if (!records[index]) return;
+
     if (!Number.isFinite(value) || value < 0) {
         event.target.textContent = records[index][field];
         return;
@@ -312,6 +442,8 @@ function updateField(event) {
 function updateName(event) {
     const index = parseInt(event.target.dataset.index, 10);
     const newName = event.target.textContent.trim();
+    if (!records[index]) return;
+
     if (newName) {
         records[index].name = newName;
         records[index].lastUpdated = new Date().toLocaleString();
@@ -324,6 +456,7 @@ function updateName(event) {
 // 遭遇時の処理
 function handleEncounter(index) {
     const record = records[index];
+    if (!record) return;
 
     const { container, close } = openModal(`
         <div class="drop-input-modal">
@@ -392,6 +525,8 @@ function handleEncounter(index) {
 // 遭遇履歴モーダルを表示
 function showHistory(index) {
     const record = records[index];
+    if (!record) return;
+
     const log = record.encounterLog || [];
 
     const rows = log.length === 0
@@ -433,6 +568,8 @@ function showHistory(index) {
 
 // 削除確認ダイアログを表示
 function confirmDelete(idx, btn) {
+    if (!records[idx]) return;
+
     const name = escapeHtml(records[idx].name);
     const { container, close } = openModal(`
         <div class="drop-input-modal">
@@ -459,6 +596,8 @@ function confirmDelete(idx, btn) {
 // 遭遇なしボタンの処理
 function addRoundNoEncounter(index) {
     const record = records[index];
+    if (!record) return;
+
     pushHistory(record);
 
     record.totalRounds         += 1;
@@ -475,6 +614,8 @@ function addRoundNoEncounter(index) {
 function undoRecord(event) {
     const index  = parseInt(event.currentTarget.dataset.index, 10);
     const record = records[index];
+    if (!record) return;
+
     if (record.history.length === 0) return;
 
     const { history, future, ...currentState } = record;
@@ -489,6 +630,8 @@ function undoRecord(event) {
 function redoRecord(event) {
     const index  = parseInt(event.currentTarget.dataset.index, 10);
     const record = records[index];
+    if (!record) return;
+
     if (record.future.length === 0) return;
 
     const { history, future, ...currentState } = record;
@@ -501,70 +644,13 @@ function redoRecord(event) {
 
 // 記録を削除する
 function deleteRecord(index) {
+    if (!records[index]) return;
+
     records.splice(index, 1);
     editModes.splice(index, 1);
     activeTabIndex = Math.max(0, Math.min(activeTabIndex, records.length - 1));
     saveRecords();
     renderTabs();
-}
-
-// ==============================
-// バックアップ / 復元
-// ==============================
-function exportRecords() {
-    const data = JSON.stringify(records.map(r => {
-        const { history, future, ...rest } = r;
-        return rest;
-    }), null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `excounter_backup_${new Date().toLocaleDateString('ja-JP').replace(/\//g, '-')}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-}
-
-function importRecords(file) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        try {
-            const parsed = JSON.parse(e.target.result);
-            if (!Array.isArray(parsed)) throw new Error('invalid format');
-
-            const { container, close } = openModal(`
-                <div class="drop-input-modal">
-                    <p style="margin:0 0 12px;text-align:center">
-                        データを復元します。<br>
-                        <small style="white-space:nowrap">現在のデータは上書きされます</small>
-                    </p>
-                    <div style="display:flex;gap:8px;justify-content:center">
-                        <button class="btn btn-danger confirm-import-ok">復元する</button>
-                        <button class="btn btn-secondary confirm-import-cancel">キャンセル</button>
-                    </div>
-                </div>
-            `);
-            container.querySelector('.confirm-import-cancel').addEventListener('click', close);
-            container.querySelector('.confirm-import-ok').addEventListener('click', () => {
-                records = parsed.map(record => ({
-                    ...record,
-                    defeats:      record.defeats      ?? 0,
-                    totalDrops:   record.totalDrops   ?? 0,
-                    encounterLog: record.encounterLog ?? [],
-                    history: [],
-                    future:  [],
-                }));
-                editModes = records.map(() => false);
-                activeTabIndex = 0;
-                saveRecords();
-                renderTabs();
-                close();
-            });
-        } catch {
-            alert('ファイルの読み込みに失敗しました。\nJSON形式が正しくありません。');
-        }
-    };
-    reader.readAsText(file);
 }
 
 // ==============================
@@ -592,6 +678,81 @@ async function showChangelog() {
 }
 
 // ==============================
+// UUIDアクセス切り替え
+// ==============================
+async function switchToUuid(uuidInput) {
+    const uuid = uuidInput.trim();
+    if (!isValidUuid(uuid)) {
+        alert('UUID形式が正しくありません。');
+        return false;
+    }
+
+    try {
+        const res = await fetch(buildApiUrl(`/api/records/${encodeURIComponent(uuid)}`));
+        if (res.status === 404) {
+            alert('指定UUIDのデータは見つかりませんでした。');
+            return false;
+        }
+        if (!res.ok) throw new Error('fetch failed');
+
+        const data = await res.json();
+        currentUuid = data.uuid;
+        records = normalizeRecords(data.records);
+        editModes = records.map(() => false);
+        activeTabIndex = 0;
+
+        localStorage.setItem(UUID_STORAGE_KEY, currentUuid);
+        updateUuidDisplay();
+        renderTabs();
+        return true;
+    } catch (e) {
+        console.error(e);
+        alert('UUIDデータの読み込みに失敗しました。');
+        return false;
+    }
+}
+
+function openUuidAccessModal() {
+    const { container, close } = openModal(`
+        <div class="drop-input-modal">
+            <label>UUIDを入力してデータを開く</label>
+            <input type="text" class="uuid-input form-control" placeholder="例: 123e4567-e89b-12d3-a456-426614174000" value="${escapeHtml(currentUuid || '')}">
+            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+                <button class="btn btn-primary uuid-load">読み込む</button>
+                <button class="btn btn-outline-secondary uuid-copy">現在UUIDをコピー</button>
+                <button class="btn btn-secondary uuid-cancel">キャンセル</button>
+            </div>
+        </div>
+    `);
+
+    const input = container.querySelector('.uuid-input');
+    input.focus();
+    input.select();
+
+    container.querySelector('.uuid-cancel').addEventListener('click', close);
+    container.querySelector('.uuid-copy').addEventListener('click', async () => {
+        if (!currentUuid) return;
+        try {
+            await navigator.clipboard.writeText(currentUuid);
+            alert('UUIDをコピーしました。');
+        } catch {
+            alert(`UUID: ${currentUuid}`);
+        }
+    });
+    container.querySelector('.uuid-load').addEventListener('click', async () => {
+        const ok = await switchToUuid(input.value);
+        if (ok) close();
+    });
+    input.addEventListener('keydown', async (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            const ok = await switchToUuid(input.value);
+            if (ok) close();
+        }
+    });
+}
+
+// ==============================
 // ハンバーガーメニュー
 // ==============================
 function openSidebar() {
@@ -613,26 +774,50 @@ document.getElementById('hamburger-btn').addEventListener('click', (e) => {
     document.getElementById('sidebar').classList.contains('open') ? closeSidebar() : openSidebar();
 });
 document.getElementById('sidebar-backdrop').addEventListener('click', closeSidebar);
-
-document.getElementById('export-btn').addEventListener('click', () => {
-    exportRecords();
-    closeSidebar();
-});
-document.getElementById('import-btn').addEventListener('click', () => {
-    document.getElementById('import-file-input').click();
-    closeSidebar();
-});
-document.getElementById('import-file-input').addEventListener('change', (e) => {
-    if (e.target.files[0]) {
-        importRecords(e.target.files[0]);
-        e.target.value = '';
-    }
-});
 document.getElementById('changelog-btn').addEventListener('click', () => {
     showChangelog();
     closeSidebar();
 });
+document.getElementById('uuid-access-btn').addEventListener('click', () => {
+    openUuidAccessModal();
+    closeSidebar();
+});
 
 // 初期化
-loadRecords();
-renderTabs();
+async function initializeApp() {
+    try {
+        if (!API_BASE_URL && /github\.io$/i.test(location.hostname)) {
+            alert('APIエンドポイントが未設定です。index.htmlで window.EXCOUNTER_API_BASE_URL を設定してください。');
+            return;
+        }
+        await setupSession();
+        renderTabs();
+    } catch (e) {
+        console.error(e);
+        alert('初期化に失敗しました。APIエンドポイント設定を確認してください。');
+    }
+}
+
+window.addEventListener('beforeunload', () => {
+    if (saveTimerId) {
+        clearTimeout(saveTimerId);
+        saveTimerId = null;
+    }
+    if (saveQueued) {
+        saveQueued = false;
+        void flushPendingSave(true);
+    }
+});
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && saveQueued) {
+        if (saveTimerId) {
+            clearTimeout(saveTimerId);
+            saveTimerId = null;
+        }
+        saveQueued = false;
+        void flushPendingSave(true);
+    }
+});
+
+void initializeApp();
